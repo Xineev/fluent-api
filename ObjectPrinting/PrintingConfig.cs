@@ -12,11 +12,17 @@ namespace ObjectPrinting
     public class PrintingConfig<TOwner>
     {
         private readonly HashSet<Type> excludedTypes = new HashSet<Type>();
+
         private readonly HashSet<string> excludedProperties = new HashSet<string>();
+
         private readonly Dictionary<Type, Delegate> typeSerializers = new Dictionary<Type, Delegate>();
+
         private readonly Dictionary<string, Delegate> propertySerializers = new Dictionary<string, Delegate>();
+
         private readonly Dictionary<Type, CultureInfo> cultureSettings = new Dictionary<Type, CultureInfo>();
+
         private int stringTrimmingValue = -1;
+
         private readonly HashSet<object> currentPrintingObjects = new HashSet<object>();
         
         private readonly Type[] finalTypes = 
@@ -27,7 +33,8 @@ namespace ObjectPrinting
             typeof(uint), typeof(long), typeof(ulong), typeof(decimal),
             typeof(Guid)
         };
-        private readonly Type[] forbiddenTypes = { typeof(string), typeof(bool), typeof(char) };
+
+        private readonly Type[] typesWithoutCulture = { typeof(string), typeof(bool), typeof(char) };
 
         public string PrintToString(TOwner obj)
         {
@@ -40,16 +47,17 @@ namespace ObjectPrinting
             if (obj == null)
                 return "null" + Environment.NewLine;
 
-            // Проверка на циклические ссылки
             if (currentPrintingObjects.Contains(obj))
                 return $"Cyclic reference detected{Environment.NewLine}";
 
             currentPrintingObjects.Add(obj);
 
+            var type = obj.GetType();
+
             string result;
-            if (IsFinalType(obj))
+            if (IsFinalType(type))
             {
-                result = HandleFinalType(obj);
+                result = HandleFinalType(obj, type);
             }
             else if (obj is IEnumerable collection)
             {
@@ -57,56 +65,71 @@ namespace ObjectPrinting
             }
             else
             {
-                result = HandleComplexObject(obj, nestingLevel);
+                result = HandleComplexObject(obj, nestingLevel, type);
             }
 
             currentPrintingObjects.Remove(obj);
             return result;
         }
 
-        private bool IsFinalType(object obj)
+        private bool IsFinalType(Type objType)
         {
-            return finalTypes.Contains(obj.GetType());
+            return finalTypes.Contains(objType);
         }
 
-        private string HandleFinalType(object obj)
+        private string HandleFinalType(object finalTypeObj, Type objType)
         {
-            var type = obj.GetType();
 
-            if (cultureSettings.ContainsKey(type) && obj is IFormattable formattable)
+            if (cultureSettings.ContainsKey(objType) && finalTypeObj is IFormattable formattable)
             {
-                return formattable.ToString(null, cultureSettings[type]) + Environment.NewLine;
+                return formattable.ToString(null, cultureSettings[objType]) + Environment.NewLine;
             }
 
-            return obj + Environment.NewLine;
+            return finalTypeObj + Environment.NewLine;
         }
 
         private string HandleCollection(IEnumerable collection, int nestingLevel)
         {
             var sb = new StringBuilder();
-            var identation = new string('\t', nestingLevel + 1);
+            var indentation = new string('\t', nestingLevel + 1);
 
             if (collection is IDictionary dictionary)
             {
                 sb.AppendLine("Dictionary");
                 foreach (var key in dictionary.Keys)
                 {
-                    sb.Append(identation + $"[{PrintSimpleValue(key)}] = ");
+                    sb.Append(indentation + $"[{PrintSimpleValue(key)}] = ");
                     sb.Append(PrintToString(dictionary[key], nestingLevel + 1));
                 }
+
+                return sb.ToString();
+            }
+            else if (collection.GetType().IsArray)
+            {
+                sb.AppendLine("Array");
+            }
+            else if (collection is IList)
+            {
+                sb.AppendLine("List");
             }
             else
             {
                 sb.AppendLine("Collection");
-                int index = 0;
-                foreach (var item in collection)
-                {
-                    sb.Append(identation + $"[{index}] = ");
-                    sb.Append(PrintToString(item, nestingLevel + 1));
-                    index++;
-                }
             }
+
+            PrintCollection(sb, collection, indentation, nestingLevel);
             return sb.ToString();
+        }
+
+        private void PrintCollection(StringBuilder sb, IEnumerable collection, string indentation, int nestingLevel)
+        {
+            int index = 0;
+            foreach (var item in collection)
+            {
+                sb.Append(indentation + $"[{index}] = ");
+                sb.Append(PrintToString(item, nestingLevel + 1));
+                index++;
+            }
         }
 
         private string PrintSimpleValue(object value)
@@ -115,20 +138,19 @@ namespace ObjectPrinting
             return value.ToString();
         }
 
-        private string HandleComplexObject(object obj, int nestingLevel)
+        private string HandleComplexObject(object obj, int nestingLevel, Type objType)
         {
             var sb = new StringBuilder();
-            var type = obj.GetType();
-            var identation = new string('\t', nestingLevel + 1);
+            var indentation = new string('\t', nestingLevel + 1);
 
-            sb.AppendLine(type.Name);
-            foreach (var propertyInfo in type.GetProperties())
+            sb.AppendLine(objType.Name);
+            foreach (var propertyInfo in objType.GetProperties())
             {
                 if (ShouldSkipProperty(propertyInfo))
                     continue;
 
                 var propertyValue = propertyInfo.GetValue(obj);
-                sb.Append(identation + propertyInfo.Name + " = ");
+                sb.Append(indentation + propertyInfo.Name + " = ");
                 sb.Append(HandlePropertyValue(propertyInfo, propertyValue, nestingLevel));
             }
             return sb.ToString();
@@ -140,51 +162,29 @@ namespace ObjectPrinting
                    excludedProperties.Contains(propertyInfo.Name);
         }
 
-        private string HandlePropertyValue(PropertyInfo propertyInfo, object propertyValue,
-            int nestingLevel)
+        private string HandlePropertyValue(PropertyInfo propertyInfo, object propertyValue, int nestingLevel)
         {
+            if (propertyInfo.PropertyType == typeof(string) && stringTrimmingValue > -1 && propertyValue != null)
+            {
+                var str = (string)propertyValue;
+                propertyValue = str.Length <= stringTrimmingValue ? str : str.Substring(0, stringTrimmingValue);
+            }
+
             if (typeSerializers.ContainsKey(propertyInfo.PropertyType))
             {
-                return ApplyTypeSerializer(propertyInfo, propertyValue, nestingLevel);
-            }
-            else if (propertySerializers.ContainsKey(propertyInfo.Name))
-            {
-                return ApplyPropertySerializer(propertyInfo.Name, propertyValue, nestingLevel);
-            }
-            else
-            {
-                return PrintToString(propertyValue, nestingLevel + 1);
-            }
-        }
-
-        private string ApplyTypeSerializer(PropertyInfo propertyInfo, object propertyValue,
-            int nestingLevel)
-        {
-            var serializer = typeSerializers[propertyInfo.PropertyType];
-            object serializedValue;
-
-            if (propertyInfo.PropertyType == typeof(string) && stringTrimmingValue > -1)
-            {
-                var stringValue = propertyValue?.ToString() ?? "";
-                var trimmedValue = stringValue.Length <= stringTrimmingValue
-                    ? stringValue
-                    : stringValue.Substring(0, stringTrimmingValue);
-                serializedValue = serializer.DynamicInvoke(trimmedValue);
-            }
-            else
-            {
-                serializedValue = serializer.DynamicInvoke(propertyValue);
+                var serializer = typeSerializers[propertyInfo.PropertyType];
+                var serializedValue = serializer.DynamicInvoke(propertyValue);
+                return PrintToString(serializedValue, nestingLevel + 1);
             }
 
-            return PrintToString(serializedValue, nestingLevel + 1);
-        }
+            if (propertySerializers.ContainsKey(propertyInfo.Name))
+            {
+                var serializer = propertySerializers[propertyInfo.Name];
+                var serializedValue = serializer.DynamicInvoke(propertyValue);
+                return PrintToString(serializedValue, nestingLevel + 1);
+            }
 
-        private string ApplyPropertySerializer(string propertyName, object propertyValue,
-            int nestingLevel)
-        {
-            var serializer = propertySerializers[propertyName];
-            var serializedValue = serializer.DynamicInvoke(propertyValue);
-            return PrintToString(serializedValue, nestingLevel + 1);
+            return PrintToString(propertyValue, nestingLevel + 1);
         }
 
         public PrintingConfig<TOwner> Exclude<TType>()
@@ -223,7 +223,7 @@ namespace ObjectPrinting
         {
             var type = typeof(T);
 
-            if (forbiddenTypes.Contains(type))
+            if (typesWithoutCulture.Contains(type))
             {
                 throw new ArgumentException($"Culture cannot be set for type {type.Name} because it doesn't support meaningful culture-specific formatting");
             }
