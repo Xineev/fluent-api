@@ -61,7 +61,7 @@ namespace ObjectPrinting
             }
             else if (obj is IEnumerable collection)
             {
-                result = HandleCollection(collection, nestingLevel);
+                result = HandleCollection(collection, nestingLevel, type);
             }
             else
             {
@@ -88,7 +88,7 @@ namespace ObjectPrinting
             return finalTypeObj + Environment.NewLine;
         }
 
-        private string HandleCollection(IEnumerable collection, int nestingLevel)
+        private string HandleCollection(IEnumerable collection, int nestingLevel, Type collectionType)
         {
             var sb = new StringBuilder();
             var indentation = new string('\t', nestingLevel + 1);
@@ -104,7 +104,7 @@ namespace ObjectPrinting
 
                 return sb.ToString();
             }
-            else if (collection.GetType().IsArray)
+            else if (collectionType.IsArray)
             {
                 sb.AppendLine("Array");
             }
